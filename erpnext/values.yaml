@@ -3,13 +3,13 @@
 # Declare variables to be passed into your templates.
 
 # Configure external database host
-# dbHost: ""
-# dbPort: 3306
-# dbRootUser: ""
-# dbRootPassword: ""
-# dbRds: false
-# dbExistingSecret: ""
-# dbExistingSecretPasswordKey: "password"
+dbHost: "192.168.0.127"
+dbPort: 3306
+dbRootUser: "root"
+dbRootPassword: ""
+dbRds: false
+dbExistingSecret: "frappe-secret"
+dbExistingSecretPasswordKey: "db-root-password"
 
 # Configure external redis host
 externalRedis:
@@ -17,8 +17,8 @@ externalRedis:
   queue: ""
 
 image:
-  repository: frappe/erpnext
-  tag: v16.37.0
+  repository: didin8080/frappe-build-test
+  tag: "1"
   pullPolicy: IfNotPresent
 
 nginx:
@@ -288,9 +288,9 @@ persistence:
     enabled: true
     # existingClaim: ""
     size: 8Gi
-    # storageClass: "nfs"
+    storageClass: "local-path"
     accessModes:
-    - ReadWriteMany
+    - ReadWriteOnce
   logs:
     # Container based log search and analytics stack recommended
     enabled: false
@@ -388,19 +388,19 @@ jobs:
 
   createMultipleSites:
     # jobName: ""
-    enabled: false
+    enabled: true
     forceCreate: false
     sites:
-    - name: "erp.cluster.local"
+    - name: "didin.test"
       installApps:
       - "erpnext"
       # - name: "accounts.cluster.local"
       #   installApps:
       #     - "erpnext"
       #     - "payments"
-    adminPassword: "changeit"
-    adminExistingSecret: ""
-    adminExistingSecretKey: "password"
+    adminPassword: ""
+    adminExistingSecret: "frappe-secret"
+    adminExistingSecretKey: "admin-password"
     dbType: "mariadb"
     backoffLimit: 0
     resources: {}
