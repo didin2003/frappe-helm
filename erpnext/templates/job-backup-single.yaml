@@ -1,0 +1,139 @@
+{{- if .Values.jobs.backup.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ template "erpnext.fullname" . }}-backup-{{ now | date "20060102150405" }}
+  labels:
+    {{- include "erpnext.labels" . | nindent 4 }}
+spec:
+  backoffLimit: {{ .Values.jobs.backup.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: backup
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ template "erpnext.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: backup
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -Eeuo pipefail
+              mkdir -p /shared/backup-files
+              rm -f /shared/backup-files/.backup-complete /shared/backup-files/.backup-failed
+
+              echo "Starting backup for ${SITE_NAME}"
+
+              if bench --site="${SITE_NAME}" backup \
+                --with-files \
+                --backup-path /shared/backup-files; then
+                echo "Backup completed successfully"
+                touch /shared/backup-files/.backup-complete
+              else
+                echo "Backup failed for ${SITE_NAME}"
+                touch /shared/backup-files/.backup-failed
+                exit 1
+              fi
+          env:
+            - name: SITE_NAME
+              value: {{ .Values.jobs.backup.siteName | quote }}
+          resources:
+            {{- toYaml .Values.jobs.backup.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: sites-dir
+              mountPath: /home/frappe/frappe-bench/sites
+            - name: logs
+              mountPath: /home/frappe/frappe-bench/logs
+            - name: shared
+              mountPath: /shared
+
+        - name: s3-upload
+          image: public.ecr.aws/aws-cli/aws-cli:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "Waiting for Frappe backup to finish"
+
+              i=0
+              while [ "$i" -lt 3600 ]; do
+                if [ -f /shared/backup-files/.backup-failed ]; then
+                  echo "Backup failed; skipping S3 upload"
+                  exit 1
+                fi
+                if [ -f /shared/backup-files/.backup-complete ]; then
+                  break
+                fi
+                sleep 2
+                i=$((i + 2))
+              done
+
+              if [ ! -f /shared/backup-files/.backup-complete ]; then
+                echo "Backup completion marker not found"
+                exit 1
+              fi
+
+              echo "Uploading backup files to S3"
+              aws s3 cp /shared/backup-files/ \
+                "s3://${S3_BUCKET}/${S3_PREFIX}/${SITE_NAME}/" \
+                --recursive \
+                --exclude ".backup-complete" \
+                --exclude ".backup-failed"
+
+              echo "Verifying uploaded files"
+              aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/${SITE_NAME}/"
+              echo "S3 upload completed"
+          env:
+            - name: SITE_NAME
+              value: {{ .Values.jobs.backup.siteName | quote }}
+            - name: S3_BUCKET
+              value: {{ .Values.jobs.backup.s3.bucket | quote }}
+            - name: S3_PREFIX
+              value: {{ .Values.jobs.backup.s3.prefix | quote }}
+            - name: AWS_DEFAULT_REGION
+              value: {{ .Values.jobs.backup.s3.region | quote }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.jobs.backup.s3.existingSecret | quote }}
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+
+      volumes:
+        - name: shared
+          emptyDir: {}
+        - name: sites-dir
+          persistentVolumeClaim:
+            {{- if .Values.persistence.worker.existingClaim }}
+            claimName: {{ .Values.persistence.worker.existingClaim }}
+            {{- else }}
+            claimName: {{ template "erpnext.fullname" . }}
+            {{- end }}
+        - name: logs
+          {{- if .Values.persistence.logs.enabled }}
+          persistentVolumeClaim:
+            {{- if .Values.persistence.logs.existingClaim }}
+            claimName: {{ .Values.persistence.logs.existingClaim }}
+            {{- else }}
+            claimName: {{ template "erpnext.fullname" . }}-logs
+            {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.jobs.backup.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.jobs.backup.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

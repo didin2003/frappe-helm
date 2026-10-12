@@ -1,0 +1,152 @@
+{{- if .Values.jobs.restore.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-restore-%s" .Release.Name (randAlphaNum 6 | lower) }}
+  labels:
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/component: restore
+spec:
+  backoffLimit: {{ .Values.jobs.restore.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: erpnext
+        app.kubernetes.io/component: restore
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: restore
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          workingDir: /home/frappe/frappe-bench
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -Eeuo pipefail
+
+              SITES_DIR="/home/frappe/frappe-bench/sites"
+              BACKUP_DIR="${SITES_DIR}/${SOURCE_SITE}/private/backups"
+              TARGET_DIR="${SITES_DIR}/${SITE_NAME}"
+
+              echo "Restore source site: ${SOURCE_SITE}"
+              echo "Restore target site: ${SITE_NAME}"
+              echo "Backup directory: ${BACKUP_DIR}"
+
+              # Never overwrite an existing target site.
+              if [ -e "${TARGET_DIR}" ]; then
+                echo "ERROR: Target site already exists: ${TARGET_DIR}"
+                echo "Choose a new target site name or investigate the existing site."
+                exit 1
+              fi
+
+              if [ ! -d "${BACKUP_DIR}" ]; then
+                echo "ERROR: Backup directory not found: ${BACKUP_DIR}"
+                exit 1
+              fi
+
+              # Find the newest database backup by modification time.
+              DB_BACKUP="$(
+                find "${BACKUP_DIR}" -maxdepth 1 -type f \
+                  \( -name '*-database.sql.gz' -o -name '*-database.sql' \) \
+                  -printf '%T@ %p\n' |
+                sort -nr |
+                head -n 1 |
+                cut -d' ' -f2-
+              )"
+
+              if [ -z "${DB_BACKUP}" ] || [ ! -f "${DB_BACKUP}" ]; then
+                echo "ERROR: No database backup found."
+                exit 1
+              fi
+
+              case "${DB_BACKUP}" in
+                *-database.sql.gz)
+                  BACKUP_PREFIX="${DB_BACKUP%-database.sql.gz}"
+                  ;;
+                *-database.sql)
+                  BACKUP_PREFIX="${DB_BACKUP%-database.sql}"
+                  ;;
+                *)
+                  echo "ERROR: Unexpected database backup filename."
+                  exit 1
+                  ;;
+              esac
+
+              # Use file archives from the same backup timestamp.
+              PUBLIC_BACKUP="${BACKUP_PREFIX}-files.tar"
+              PRIVATE_BACKUP="${BACKUP_PREFIX}-private-files.tar"
+
+              if [ ! -f "${PUBLIC_BACKUP}" ]; then
+                PUBLIC_BACKUP="${BACKUP_PREFIX}-files.tgz"
+              fi
+
+              if [ ! -f "${PRIVATE_BACKUP}" ]; then
+                PRIVATE_BACKUP="${BACKUP_PREFIX}-private-files.tgz"
+              fi
+
+              if [ ! -f "${PUBLIC_BACKUP}" ]; then
+                echo "ERROR: Matching public-files archive not found."
+                exit 1
+              fi
+
+              if [ ! -f "${PRIVATE_BACKUP}" ]; then
+                echo "ERROR: Matching private-files archive not found."
+                exit 1
+              fi
+
+              echo "Database backup: ${DB_BACKUP}"
+              echo "Public files: ${PUBLIC_BACKUP}"
+              echo "Private files: ${PRIVATE_BACKUP}"
+
+              # Create a fresh site/database; do not use --force.
+              bench new-site "${SITE_NAME}" \
+                --mariadb-user-host-login-scope='%' \
+                --db-type="mariadb" \
+                --db-host="${DB_HOST}" \
+                --db-port="${DB_PORT}" \
+                --admin-password="${ADMIN_PASSWORD}" \
+                --mariadb-root-username="${DB_ROOT_USER}" \
+                --mariadb-root-password="${DB_ROOT_PASSWORD}"
+
+              # Restore the database and both file archives.
+              bench --site "${SITE_NAME}" restore "${DB_BACKUP}" \
+                --db-root-username="${DB_ROOT_USER}" \
+                --db-root-password="${DB_ROOT_PASSWORD}" \
+                --admin-password="${ADMIN_PASSWORD}" \
+                --with-public-files "${PUBLIC_BACKUP}" \
+                --with-private-files "${PRIVATE_BACKUP}"
+
+              echo "Restore completed successfully for ${SITE_NAME}"
+
+          env:
+            - name: SOURCE_SITE
+              value: {{ .Values.jobs.restore.sourceSite | quote }}
+            - name: SITE_NAME
+              value: {{ .Values.jobs.restore.siteName | quote }}
+            - name: DB_HOST
+              value: {{ .Values.dbHost | quote }}
+            - name: DB_PORT
+              value: {{ .Values.dbPort | quote }}
+            - name: DB_ROOT_USER
+              value: {{ .Values.dbRootUser | quote }}
+            - name: DB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dbExistingSecret | quote }}
+                  key: {{ .Values.dbExistingSecretPasswordKey | quote }}
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dbExistingSecret | quote }}
+                  key: admin-password
+
+          volumeMounts:
+            - name: sites-dir
+              mountPath: /home/frappe/frappe-bench/sites
+
+      volumes:
+        - name: sites-dir
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.worker.existingClaim | default "frappe-erpnext" | quote }}
+{{- end }}

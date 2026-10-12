@@ -2,58 +2,98 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  {{- if .Values.jobs.backup.jobName }}
-  name: {{ .Values.jobs.backup.jobName }}
-  {{- else }}
   name: {{ template "erpnext.fullname" . }}-backup-{{ now | date "20060102150405" }}
-  {{- end }}
   labels:
     {{- include "erpnext.labels" . | nindent 4 }}
 spec:
   backoffLimit: {{ .Values.jobs.backup.backoffLimit }}
   template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: backup
     spec:
-    {{- with .Values.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-    {{- end }}
-      serviceAccountName: {{ template "erpnext.serviceAccountName" $ }}
-      securityContext:
-        {{- toYaml $.Values.podSecurityContext | nindent 8 }}
-      containers:
-      - name: backup
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-        imagePullPolicy: {{ .Values.image.pullPolicy }}
-        command: ["bash", "-c"]
-        args:
-          - >
-            bench --site=$(SITE_NAME) {{- if .Values.jobs.backup.withFiles }} backup --with-files; {{- else }} backup; {{- end }}
-        env:
-          - name: "SITE_NAME"
-            value: "{{ .Values.jobs.backup.siteName }}"
-        resources:
-          {{- toYaml .Values.jobs.backup.resources | nindent 10 }}
-        securityContext:
-          {{- toYaml $.Values.securityContext | nindent 10 }}
-        volumeMounts:
-          - name: sites-dir
-            mountPath: /home/frappe/frappe-bench/sites
-          - name: logs
-            mountPath: /home/frappe/frappe-bench/logs
       restartPolicy: Never
+      serviceAccountName: {{ template "erpnext.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: backup
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -Eeuo pipefail
+
+              BACKUP_DIR="/shared/backup-files"
+              S3_PATH="s3://${S3_BUCKET}/${S3_PREFIX}/${SITE_NAME}"
+
+              mkdir -p "${BACKUP_DIR}"
+              rm -f "${BACKUP_DIR}/.backup-complete" \
+                    "${BACKUP_DIR}/.backup-failed"
+
+              trap 'touch "${BACKUP_DIR}/.backup-failed"' ERR
+
+              echo "Starting backup for ${SITE_NAME}"
+
+              bench --site="${SITE_NAME}" backup \
+                --with-files \
+                --backup-path "${BACKUP_DIR}"
+
+              echo "Frappe backup generated successfully"
+              echo "Uploading backup files to ${S3_PATH}"
+
+              aws s3 cp "${BACKUP_DIR}/" "${S3_PATH}/" \
+                --recursive \
+                --exclude ".backup-complete" \
+                --exclude ".backup-failed"
+
+              echo "Checking S3 destination"
+              aws s3 ls "${S3_PATH}/"
+
+              touch "${BACKUP_DIR}/.backup-complete"
+              echo "Backup and S3 upload completed successfully"
+
+          env:
+            - name: SITE_NAME
+              value: {{ .Values.jobs.backup.siteName | quote }}
+            - name: S3_BUCKET
+              value: {{ .Values.jobs.backup.s3.bucket | quote }}
+            - name: S3_PREFIX
+              value: {{ .Values.jobs.backup.s3.prefix | quote }}
+            - name: AWS_DEFAULT_REGION
+              value: {{ .Values.jobs.backup.s3.region | quote }}
+
+          envFrom:
+            - secretRef:
+                name: {{ .Values.jobs.backup.s3.existingSecret | quote }}
+
+          resources:
+            {{- toYaml .Values.jobs.backup.resources | nindent 12 }}
+
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+
+          volumeMounts:
+            - name: sites-dir
+              mountPath: /home/frappe/frappe-bench/sites
+            - name: logs
+              mountPath: /home/frappe/frappe-bench/logs
+            - name: shared
+              mountPath: /shared
+
       volumes:
+        - name: shared
+          emptyDir: {}
+
         - name: sites-dir
-          {{- if .Values.persistence.worker.enabled }}
           persistentVolumeClaim:
             {{- if .Values.persistence.worker.existingClaim }}
             claimName: {{ .Values.persistence.worker.existingClaim }}
             {{- else }}
             claimName: {{ template "erpnext.fullname" . }}
             {{- end }}
-            readOnly: false
-          {{- else }}
-          emptyDir: {}
-          {{- end }}
+
         - name: logs
           {{- if .Values.persistence.logs.enabled }}
           persistentVolumeClaim:
@@ -62,18 +102,15 @@ spec:
             {{- else }}
             claimName: {{ template "erpnext.fullname" . }}-logs
             {{- end }}
-            readOnly: false
           {{- else }}
           emptyDir: {}
           {{- end }}
-      {{- with .Values.jobs.backup.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+
       {{- with .Values.jobs.backup.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+
       {{- with .Values.jobs.backup.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}

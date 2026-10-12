@@ -1,0 +1,124 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: frappe-s3-backup-test-20261012-01
+  namespace: erpnext
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app: frappe-s3-backup-test
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: test-worker
+
+      volumes:
+        - name: sites-dir
+          persistentVolumeClaim:
+            claimName: frappe-erpnext
+        - name: backup-work
+          emptyDir: {}
+
+      containers:
+        - name: backup
+          image: didin8080/frappe-build-test:1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -Eeuo pipefail
+
+              finish() {
+                rc=$?
+                echo "$rc" > /shared/backup.exit
+                exit "$rc"
+              }
+              trap finish EXIT
+
+              mkdir -p /shared/backup-files
+              cd /home/frappe/frappe-bench
+
+              echo "Starting fresh backup of ${SITE_NAME}"
+
+              bench --site="${SITE_NAME}" backup \
+                --with-files \
+                --backup-path /shared/backup-files
+
+              if ! find /shared/backup-files -type f -print -quit | grep -q .; then
+                echo "ERROR: No backup files were generated"
+                exit 1
+              fi
+
+              echo "Backup files generated:"
+              find /shared/backup-files -type f -printf '%f (%s bytes)\n'
+
+              echo "Backup generation completed"
+
+          env:
+            - name: SITE_NAME
+              value: "didin.test"
+
+          volumeMounts:
+            - name: sites-dir
+              mountPath: /home/frappe/frappe-bench/sites
+            - name: backup-work
+              mountPath: /shared
+
+        - name: uploader
+          image: public.ecr.aws/aws-cli/aws-cli:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+
+              S3_PREFIX="frappe-backups/didin.test/manual-test-20261012-01"
+
+              echo "Waiting for backup container to finish"
+
+              while [ ! -f /shared/backup.exit ]; do
+                sleep 2
+              done
+
+              rc="$(cat /shared/backup.exit)"
+
+              if [ "$rc" != "0" ]; then
+                echo "ERROR: Backup generation failed with exit code $rc"
+                exit 1
+              fi
+
+              echo "Uploading backup files to S3"
+
+              aws s3 cp /shared/backup-files/ \
+                "s3://biz-backups/${S3_PREFIX}/" \
+                --recursive
+
+              echo "Verifying uploaded objects"
+
+              count="$(aws s3api list-objects-v2 \
+                --bucket biz-backups \
+                --prefix "${S3_PREFIX}/" \
+                --query 'KeyCount' \
+                --output text)"
+
+              echo "Objects found in S3: ${count}"
+
+              if [ "$count" -lt 1 ]; then
+                echo "ERROR: No uploaded objects were found"
+                exit 1
+              fi
+
+              aws s3 ls "s3://biz-backups/${S3_PREFIX}/"
+
+              echo "S3 upload and verification completed successfully"
+
+          envFrom:
+            - secretRef:
+                name: frappe-s3-credentials
+
+          volumeMounts:
+            - name: backup-work
+              mountPath: /shared
