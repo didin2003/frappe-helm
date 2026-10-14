@@ -1,0 +1,229 @@
+{{- if .Values.jobs.backupMultipleSitesCronJob.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ template "erpnext.fullname" . }}-backup-multiple-sites
+  labels:
+    {{- include "erpnext.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.jobs.backupMultipleSitesCronJob.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.jobs.backupMultipleSitesCronJob.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/component: backup-multiple-sites
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ template "erpnext.serviceAccountName" . }}
+
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+
+          containers:
+            - name: backup
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+              command: ["bash", "-c"]
+
+              args:
+                - |
+                  set -Eeuo pipefail
+
+                  BACKUP_ROOT="/shared/backup-files"
+                  SITES_DIR="/home/frappe/frappe-bench/sites"
+                  S3_ROOT="s3://${S3_BUCKET}/${S3_PREFIX}"
+
+                  mkdir -p "${BACKUP_ROOT}"
+
+                  echo "=========================================="
+                  echo "Starting automated all-site backup"
+                  echo "S3 destination: ${S3_ROOT}"
+                  echo "=========================================="
+
+                  # Discover all Frappe sites dynamically.
+                  # No site names are hard-coded.
+                  for SITE_DIR in "${SITES_DIR}"/*; do
+
+                    if [ ! -d "${SITE_DIR}" ]; then
+                      continue
+                    fi
+
+                    SITE_NAME="$(basename "${SITE_DIR}")"
+
+                    # Skip known non-site directories.
+                    case "${SITE_NAME}" in
+                      assets|logs|sites)
+                        echo "Skipping non-site directory: ${SITE_NAME}"
+                        continue
+                        ;;
+                    esac
+
+                    # A Frappe site should contain site_config.json.
+                    if [ ! -f "${SITE_DIR}/site_config.json" ]; then
+                      echo "Skipping ${SITE_NAME}: site_config.json not found"
+                      continue
+                    fi
+
+                    echo ""
+                    echo "=========================================="
+                    echo "Processing site: ${SITE_NAME}"
+                    echo "=========================================="
+
+                    SITE_BACKUP_DIR="${BACKUP_ROOT}/${SITE_NAME}"
+                    S3_SITE_PATH="${S3_ROOT}/${SITE_NAME}"
+
+                    mkdir -p "${SITE_BACKUP_DIR}"
+
+                    # Create a unique directory for this backup.
+                    TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+                    CURRENT_BACKUP_DIR="${SITE_BACKUP_DIR}/${TIMESTAMP}"
+
+                    mkdir -p "${CURRENT_BACKUP_DIR}"
+
+                    echo "Running Frappe backup for ${SITE_NAME}"
+
+                    if bench --site="${SITE_NAME}" backup \
+                      --with-files \
+                      --backup-path "${CURRENT_BACKUP_DIR}"; then
+
+                      echo "Frappe backup completed for ${SITE_NAME}"
+
+                    else
+
+                      echo "ERROR: Frappe backup failed for ${SITE_NAME}"
+                      rm -rf "${CURRENT_BACKUP_DIR}"
+                      continue
+
+                    fi
+
+                    echo "Uploading ${SITE_NAME} backup to S3"
+
+                    aws s3 cp "${CURRENT_BACKUP_DIR}/" \
+                      "${S3_SITE_PATH}/${TIMESTAMP}/" \
+                      --recursive
+
+                    echo "Verifying S3 upload"
+
+                    aws s3 ls \
+                      "${S3_SITE_PATH}/${TIMESTAMP}/" \
+                      --recursive
+
+                    echo "Upload completed for ${SITE_NAME}"
+
+                    # Remove temporary local backup.
+                    rm -rf "${CURRENT_BACKUP_DIR}"
+
+                    echo "Applying retention: keeping latest 3 backups"
+
+                    # Get backup directories from S3, newest first.
+                    BACKUPS="$(aws s3api list-objects-v2 \
+                      --bucket "${S3_BUCKET}" \
+                      --prefix "${S3_PREFIX}/${SITE_NAME}/" \
+                      --delimiter "/" \
+                      --query 'CommonPrefixes[].Prefix' \
+                      --output text | tr '\t' '\n' | sort -r)"
+
+                    BACKUP_COUNT=0
+
+                    while IFS= read -r BACKUP_PREFIX; do
+
+                      [ -z "${BACKUP_PREFIX}" ] && continue
+
+                      BACKUP_COUNT=$((BACKUP_COUNT + 1))
+
+                      if [ "${BACKUP_COUNT}" -le 3 ]; then
+
+                        echo "Keeping backup: ${BACKUP_PREFIX}"
+
+                      else
+
+                        echo "Deleting old backup: ${BACKUP_PREFIX}"
+
+                        aws s3 rm \
+                          "s3://${S3_BUCKET}/${BACKUP_PREFIX}" \
+                          --recursive
+
+                      fi
+
+                    done <<< "${BACKUPS}"
+
+                    echo "Retention completed for ${SITE_NAME}"
+
+                  done
+
+                  echo ""
+                  echo "=========================================="
+                  echo "Automated all-site backup completed"
+                  echo "=========================================="
+
+              env:
+                - name: S3_BUCKET
+                  value: {{ .Values.jobs.backup.s3.bucket | quote }}
+
+                - name: S3_PREFIX
+                  value: {{ .Values.jobs.backup.s3.prefix | quote }}
+
+                - name: AWS_DEFAULT_REGION
+                  value: {{ .Values.jobs.backup.s3.region | quote }}
+
+              envFrom:
+                - secretRef:
+                    name: {{ .Values.jobs.backup.s3.existingSecret | quote }}
+
+              resources:
+                {{- toYaml .Values.jobs.backupMultipleSitesCronJob.resources | nindent 16 }}
+
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+
+              volumeMounts:
+                - name: sites-dir
+                  mountPath: /home/frappe/frappe-bench/sites
+
+                - name: logs
+                  mountPath: /home/frappe/frappe-bench/logs
+
+                - name: shared
+                  mountPath: /shared
+
+          volumes:
+            - name: shared
+              emptyDir: {}
+
+            - name: sites-dir
+              persistentVolumeClaim:
+                {{- if .Values.persistence.worker.existingClaim }}
+                claimName: {{ .Values.persistence.worker.existingClaim }}
+                {{- else }}
+                claimName: {{ template "erpnext.fullname" . }}
+                {{- end }}
+
+            - name: logs
+              {{- if .Values.persistence.logs.enabled }}
+              persistentVolumeClaim:
+                {{- if .Values.persistence.logs.existingClaim }}
+                claimName: {{ .Values.persistence.logs.existingClaim }}
+                {{- else }}
+                claimName: {{ template "erpnext.fullname" . }}-logs
+                {{- end }}
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+
+          {{- with .Values.jobs.backupMultipleSitesCronJob.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          {{- with .Values.jobs.backupMultipleSitesCronJob.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}
