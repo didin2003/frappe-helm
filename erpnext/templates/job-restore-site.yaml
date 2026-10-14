@@ -8,99 +8,186 @@ metadata:
     app.kubernetes.io/component: restore
 spec:
   backoffLimit: {{ .Values.jobs.restore.backoffLimit }}
+
   template:
     metadata:
       labels:
         app.kubernetes.io/name: erpnext
         app.kubernetes.io/component: restore
+
     spec:
       restartPolicy: Never
+
+      serviceAccountName: {{ template "erpnext.serviceAccountName" . }}
+
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
       containers:
+
+        # ------------------------------------------------------------
+        # Container 1: Download backup files from S3
+        # ------------------------------------------------------------
+        - name: s3-download
+          image: public.ecr.aws/aws-cli/aws-cli:latest
+          imagePullPolicy: IfNotPresent
+
+          command: ["/bin/sh", "-c"]
+
+          args:
+            - |
+              set -eu
+
+              RESTORE_DIR="/shared/restore"
+
+              S3_ROOT="s3://${S3_BUCKET}/${S3_PREFIX}/${SITE_NAME}"
+
+              mkdir -p "${RESTORE_DIR}"
+
+              echo "=========================================="
+              echo "Starting S3 restore download"
+              echo "=========================================="
+
+              echo "S3 source:"
+              echo "${S3_ROOT}"
+
+              echo ""
+              echo "Downloading database backup..."
+
+              aws s3 cp \
+                "${S3_ROOT}/${DATABASE_FILE}" \
+                "${RESTORE_DIR}/database.sql.gz"
+
+              echo ""
+              echo "Downloading public files..."
+
+              aws s3 cp \
+                "${S3_ROOT}/${PUBLIC_FILES_FILE}" \
+                "${RESTORE_DIR}/public-files.tar"
+
+              echo ""
+              echo "Downloading private files..."
+
+              aws s3 cp \
+                "${S3_ROOT}/${PRIVATE_FILES_FILE}" \
+                "${RESTORE_DIR}/private-files.tar"
+
+              echo ""
+              echo "=========================================="
+              echo "S3 download completed"
+              echo "=========================================="
+
+              ls -lh "${RESTORE_DIR}"
+
+              touch "${RESTORE_DIR}/.download-complete"
+
+          env:
+            - name: SITE_NAME
+              value: {{ .Values.jobs.restore.sourceSite | quote }}
+
+            - name: S3_BUCKET
+              value: {{ .Values.jobs.restore.s3.bucket | quote }}
+
+            - name: S3_PREFIX
+              value: {{ .Values.jobs.restore.s3.prefix | quote }}
+
+            - name: DATABASE_FILE
+              value: {{ .Values.jobs.restore.s3.databaseFile | quote }}
+
+            - name: PUBLIC_FILES_FILE
+              value: {{ .Values.jobs.restore.s3.publicFilesFile | quote }}
+
+            - name: PRIVATE_FILES_FILE
+              value: {{ .Values.jobs.restore.s3.privateFilesFile | quote }}
+
+            - name: AWS_DEFAULT_REGION
+              value: {{ .Values.jobs.restore.s3.region | quote }}
+
+          envFrom:
+            - secretRef:
+                name: {{ .Values.jobs.restore.s3.existingSecret | quote }}
+
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+
+
+        # ------------------------------------------------------------
+        # Container 2: Restore database and files
+        # ------------------------------------------------------------
         - name: restore
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: IfNotPresent
+
           workingDir: /home/frappe/frappe-bench
+
           command: ["bash", "-c"]
+
           args:
             - |
               set -Eeuo pipefail
 
-              SITES_DIR="/home/frappe/frappe-bench/sites"
-              BACKUP_DIR="${SITES_DIR}/${SOURCE_SITE}/private/backups"
-              TARGET_DIR="${SITES_DIR}/${SITE_NAME}"
+              RESTORE_DIR="/shared/restore"
 
-              echo "Restore source site: ${SOURCE_SITE}"
-              echo "Restore target site: ${SITE_NAME}"
-              echo "Backup directory: ${BACKUP_DIR}"
+              echo "=========================================="
+              echo "Waiting for S3 download"
+              echo "=========================================="
 
-              # Never overwrite an existing target site.
-              if [ -e "${TARGET_DIR}" ]; then
-                echo "ERROR: Target site already exists: ${TARGET_DIR}"
-                echo "Choose a new target site name or investigate the existing site."
+              i=0
+
+              while [ "$i" -lt 3600 ]; do
+
+                if [ -f "${RESTORE_DIR}/.download-complete" ]; then
+                  break
+                fi
+
+                sleep 2
+                i=$((i + 2))
+
+              done
+
+              if [ ! -f "${RESTORE_DIR}/.download-complete" ]; then
+                echo "ERROR: S3 download did not complete"
                 exit 1
               fi
 
-              if [ ! -d "${BACKUP_DIR}" ]; then
-                echo "ERROR: Backup directory not found: ${BACKUP_DIR}"
+              if [ ! -f "${RESTORE_DIR}/database.sql.gz" ]; then
+                echo "ERROR: Database backup not found"
                 exit 1
               fi
 
-              # Find the newest database backup by modification time.
-              DB_BACKUP="$(
-                find "${BACKUP_DIR}" -maxdepth 1 -type f \
-                  \( -name '*-database.sql.gz' -o -name '*-database.sql' \) \
-                  -printf '%T@ %p\n' |
-                sort -nr |
-                head -n 1 |
-                cut -d' ' -f2-
-              )"
-
-              if [ -z "${DB_BACKUP}" ] || [ ! -f "${DB_BACKUP}" ]; then
-                echo "ERROR: No database backup found."
+              if [ ! -f "${RESTORE_DIR}/public-files.tar" ]; then
+                echo "ERROR: Public files backup not found"
                 exit 1
               fi
 
-              case "${DB_BACKUP}" in
-                *-database.sql.gz)
-                  BACKUP_PREFIX="${DB_BACKUP%-database.sql.gz}"
-                  ;;
-                *-database.sql)
-                  BACKUP_PREFIX="${DB_BACKUP%-database.sql}"
-                  ;;
-                *)
-                  echo "ERROR: Unexpected database backup filename."
-                  exit 1
-                  ;;
-              esac
-
-              # Use file archives from the same backup timestamp.
-              PUBLIC_BACKUP="${BACKUP_PREFIX}-files.tar"
-              PRIVATE_BACKUP="${BACKUP_PREFIX}-private-files.tar"
-
-              if [ ! -f "${PUBLIC_BACKUP}" ]; then
-                PUBLIC_BACKUP="${BACKUP_PREFIX}-files.tgz"
-              fi
-
-              if [ ! -f "${PRIVATE_BACKUP}" ]; then
-                PRIVATE_BACKUP="${BACKUP_PREFIX}-private-files.tgz"
-              fi
-
-              if [ ! -f "${PUBLIC_BACKUP}" ]; then
-                echo "ERROR: Matching public-files archive not found."
+              if [ ! -f "${RESTORE_DIR}/private-files.tar" ]; then
+                echo "ERROR: Private files backup not found"
                 exit 1
               fi
 
-              if [ ! -f "${PRIVATE_BACKUP}" ]; then
-                echo "ERROR: Matching private-files archive not found."
+              echo ""
+              echo "=========================================="
+              echo "Restore source files"
+              echo "=========================================="
+
+              ls -lh "${RESTORE_DIR}"
+
+              echo ""
+              echo "=========================================="
+              echo "Creating target site"
+              echo "=========================================="
+
+              echo "Target site: ${TARGET_SITE}"
+
+              # Never overwrite an existing site.
+              if [ -e "/home/frappe/frappe-bench/sites/${TARGET_SITE}" ]; then
+                echo "ERROR: Target site already exists:"
+                echo "/home/frappe/frappe-bench/sites/${TARGET_SITE}"
                 exit 1
               fi
 
-              echo "Database backup: ${DB_BACKUP}"
-              echo "Public files: ${PUBLIC_BACKUP}"
-              echo "Private files: ${PRIVATE_BACKUP}"
-
-              # Create a fresh site/database; do not use --force.
-              bench new-site "${SITE_NAME}" \
+              bench new-site "${TARGET_SITE}" \
                 --mariadb-user-host-login-scope='%' \
                 --db-type="mariadb" \
                 --db-host="${DB_HOST}" \
@@ -109,44 +196,113 @@ spec:
                 --mariadb-root-username="${DB_ROOT_USER}" \
                 --mariadb-root-password="${DB_ROOT_PASSWORD}"
 
-              # Restore the database and both file archives.
-              bench --site "${SITE_NAME}" restore "${DB_BACKUP}" \
+              echo ""
+              echo "=========================================="
+              echo "Restoring database"
+              echo "=========================================="
+
+              bench --site "${TARGET_SITE}" restore \
+                "${RESTORE_DIR}/database.sql.gz" \
                 --db-root-username="${DB_ROOT_USER}" \
                 --db-root-password="${DB_ROOT_PASSWORD}" \
-                --admin-password="${ADMIN_PASSWORD}" \
-                --with-public-files "${PUBLIC_BACKUP}" \
-                --with-private-files "${PRIVATE_BACKUP}"
+                --admin-password="${ADMIN_PASSWORD}"
 
-              echo "Restore completed successfully for ${SITE_NAME}"
+              echo ""
+              echo "=========================================="
+              echo "Restoring public files"
+              echo "=========================================="
+
+              bench --site "${TARGET_SITE}" restore \
+                "${RESTORE_DIR}/database.sql.gz" \
+                --with-public-files "${RESTORE_DIR}/public-files.tar" \
+                --with-private-files "${RESTORE_DIR}/private-files.tar" \
+                --db-root-username="${DB_ROOT_USER}" \
+                --db-root-password="${DB_ROOT_PASSWORD}" \
+                --admin-password="${ADMIN_PASSWORD}"
+
+              echo ""
+              echo "=========================================="
+              echo "Restore completed successfully"
+              echo "=========================================="
 
           env:
-            - name: SOURCE_SITE
-              value: {{ .Values.jobs.restore.sourceSite | quote }}
-            - name: SITE_NAME
+            - name: TARGET_SITE
               value: {{ .Values.jobs.restore.siteName | quote }}
+
             - name: DB_HOST
               value: {{ .Values.dbHost | quote }}
+
             - name: DB_PORT
               value: {{ .Values.dbPort | quote }}
+
             - name: DB_ROOT_USER
               value: {{ .Values.dbRootUser | quote }}
+
             - name: DB_ROOT_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.dbExistingSecret | quote }}
                   key: {{ .Values.dbExistingSecretPasswordKey | quote }}
+
             - name: ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.dbExistingSecret | quote }}
                   key: admin-password
 
+          resources:
+            {{- toYaml .Values.jobs.restore.resources | nindent 12 }}
+
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+
           volumeMounts:
             - name: sites-dir
               mountPath: /home/frappe/frappe-bench/sites
 
+            - name: logs
+              mountPath: /home/frappe/frappe-bench/logs
+
+            - name: shared
+              mountPath: /shared
+
+
       volumes:
+
+        # Shared between AWS CLI and Frappe containers
+        - name: shared
+          emptyDir: {}
+
+        # Existing Frappe sites PVC
         - name: sites-dir
           persistentVolumeClaim:
-            claimName: {{ .Values.persistence.worker.existingClaim | default "frappe-erpnext" | quote }}
+            {{- if .Values.persistence.worker.existingClaim }}
+            claimName: {{ .Values.persistence.worker.existingClaim }}
+            {{- else }}
+            claimName: {{ template "erpnext.fullname" . }}
+            {{- end }}
+
+        # Frappe logs
+        - name: logs
+          {{- if .Values.persistence.logs.enabled }}
+          persistentVolumeClaim:
+            {{- if .Values.persistence.logs.existingClaim }}
+            claimName: {{ .Values.persistence.logs.existingClaim }}
+            {{- else }}
+            claimName: {{ template "erpnext.fullname" . }}-logs
+            {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+
+      {{- with .Values.jobs.restore.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.jobs.restore.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
 {{- end }}

@@ -485,7 +485,7 @@ jobs:
     affinity: {}
 
   backupMultipleSitesCronJob:
-    enabled: true
+    enabled: false
     schedule: "0 */6 * * *"
     backoffLimit: 0
     resources: {}
@@ -507,8 +507,19 @@ jobs:
 
   restore:
     enabled: false
-    sourceSite: "manu.test"
     siteName: "maneesh.test"
+
+    s3:
+      bucket: "biz-backups"
+      region: "us-east-1"
+      prefix: "frappe-backups"
+
+      databaseFile: "20261014_144053-manu_test-database.sql.gz"
+      publicFilesFile: "20261014_144053-manu_test-files.tar"
+      privateFilesFile: "20261014_144053-manu_test-private-files.tar"
+
+      existingSecret: "frappe-s3-credentials"
+
     backoffLimit: 0
 
   # ------------------------------------------------------------------------------
