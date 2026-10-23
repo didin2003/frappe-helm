@@ -7,101 +7,328 @@ metadata:
   {{- else }}
   name: {{ template "erpnext.fullname" . }}-drop-sites-{{ now | date "20060102150405" }}
   {{- end }}
+
   labels:
     {{- include "erpnext.labels" . | nindent 4 }}
+    app.kubernetes.io/component: drop-sites
+
+  annotations:
+    "helm.sh/hook": post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation
+
 spec:
   backoffLimit: {{ .Values.jobs.dropMultipleSites.backoffLimit }}
+
   template:
+    metadata:
+      labels:
+        {{- include "erpnext.labels" . | nindent 8 }}
+        app.kubernetes.io/component: drop-sites
+
     spec:
-    {{- with .Values.imagePullSecrets }}
+      {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
-    {{- end }}
+      {{- end }}
+
       serviceAccountName: {{ template "erpnext.serviceAccountName" $ }}
+
       securityContext:
         {{- toYaml $.Values.podSecurityContext | nindent 8 }}
-      containers:
-      - name: drop-sites
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-        imagePullPolicy: {{ .Values.image.pullPolicy }}
-        command: ["bash", "-c"]
-        args:
-          - >
-            {{- range $site := .Values.jobs.dropMultipleSites.sites }}
-              bench drop-site {{ $site.name }} --root-login=$DB_ROOT_USER --root-password=$DB_ROOT_PASSWORD --archived-sites-path=archived_sites --no-backup {{- if $.Values.jobs.dropMultipleSites.forced }} --force{{- end }};
-            {{- end }}
 
-        env:
-          - name: DB_HOST
-            {{- if or .Values.mariadb.enabled (get .Values "mariadb-subchart").enabled }}
-            value: {{ .Release.Name }}-mariadb-subchart
-            {{- else if or .Values.postgresql.enabled (get .Values "postgresql-subchart").enabled }}
-            value: {{ .Release.Name }}-postgresql-subchart
-            {{- else if (get .Values "mariadb-sts").enabled }}
-            value: {{ include "erpnext.fullname" . }}-mariadb-sts
-            {{- else if (get .Values "postgresql-sts").enabled }}
-            value: {{ include "erpnext.fullname" . }}-postgresql-sts
-            {{- else }}
-            value: "{{ .Values.dbHost }}"
-            {{- end }}
-          - name: DB_ROOT_USER
-            {{- if or .Values.mariadb.enabled (get .Values "mariadb-subchart").enabled }}
-            value: "root"
-            {{- else if or .Values.postgresql.enabled (get .Values "postgresql-subchart").enabled }}
-            value: "postgres"
-            {{- else }}
-            value: "{{ .Values.dbRootUser }}"
-            {{- end }}
-          - name: DB_ROOT_PASSWORD
-            {{- if (get .Values "mariadb-sts").enabled }}
-            valueFrom:
-              secretKeyRef:
-                key: mariadb-root-password
-                name: {{ template "erpnext.fullname" . }}
-            {{- else if (get .Values "postgresql-sts").enabled }}
-            valueFrom:
-              secretKeyRef:
-                key: postgres-password
-                name: {{ template "erpnext.fullname" . }}
-            {{- else if or .Values.mariadb.enabled (get .Values "mariadb-subchart").enabled }}
-            valueFrom:
-              secretKeyRef:
-                name: {{ .Release.Name }}-mariadb-subchart
-                key: mariadb-root-password
-            {{- else if or .Values.postgresql.enabled (get .Values "postgresql-subchart").enabled }}
-            valueFrom:
-              secretKeyRef:
-                name: {{ .Release.Name }}-postgresql-subchart
-                key: postgres-password
-            {{- else if .Values.dbExistingSecret }}
-            valueFrom:
-              secretKeyRef:
-                key: {{ .Values.dbExistingSecretPasswordKey }}
-                name: {{ .Values.dbExistingSecret }}
-            {{- else if .Values.dbRootPassword }}
-            valueFrom:
-              secretKeyRef:
-                key: db-root-password
-                name: {{ template "erpnext.fullname" . }}
-            {{- else }}
-            valueFrom:
-              secretKeyRef:
-                key: db-root-password
-                name: {{ template "erpnext.fullname" . }}
-            {{- end }}
-        resources:
-          {{- toYaml .Values.jobs.dropMultipleSites.resources | nindent 12 }}
-        securityContext:
-          {{- toYaml $.Values.securityContext | nindent 12 }}
-        volumeMounts:
-          - name: sites-dir
-            mountPath: /home/frappe/frappe-bench/sites
-          - name: logs
-            mountPath: /home/frappe/frappe-bench/logs
+      containers:
+        - name: drop-sites
+
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          command:
+            - bash
+            - -c
+
+          args:
+            - |
+              set -Eeuo pipefail
+
+              echo "========================================="
+              echo "MULTIPLE SITE DROP OPERATION"
+              echo "========================================="
+
+              # -------------------------------------------------
+              # SITE LIST
+              # -------------------------------------------------
+
+              SITES=(
+              {{- range $site := .Values.jobs.dropMultipleSites.sites }}
+                "{{ $site.name }}"
+              {{- end }}
+              )
+
+              # -------------------------------------------------
+              # PROCESS EACH SITE
+              # -------------------------------------------------
+
+              for SITE_NAME in "${SITES[@]}"; do
+
+                echo ""
+                echo "========================================="
+                echo "Processing site: ${SITE_NAME}"
+                echo "========================================="
+
+                BACKUP_DIR="/shared/backup-files/${SITE_NAME}"
+                S3_PATH="s3://${S3_BUCKET}/${S3_PREFIX}/${SITE_NAME}/"
+
+                # -------------------------------------------------
+                # STEP 1: CHECK SITE
+                # -------------------------------------------------
+
+                echo ""
+                echo "Step 1: Checking site"
+
+                if [ ! -d "/home/frappe/frappe-bench/sites/${SITE_NAME}" ]; then
+                  echo "WARNING: Site ${SITE_NAME} does not exist."
+                  echo "Skipping ${SITE_NAME}."
+                  continue
+                fi
+
+                echo "Site ${SITE_NAME} exists."
+
+                # -------------------------------------------------
+                # STEP 2: CREATE BACKUP
+                # -------------------------------------------------
+
+                echo ""
+                echo "Step 2: Creating backup for ${SITE_NAME}"
+
+                rm -rf "${BACKUP_DIR}"
+                mkdir -p "${BACKUP_DIR}"
+
+                if bench --site="${SITE_NAME}" backup \
+                  --with-files \
+                  --backup-path "${BACKUP_DIR}"
+                then
+                  echo "Backup completed successfully for ${SITE_NAME}."
+                else
+                  echo "ERROR: Backup failed for ${SITE_NAME}."
+                  echo "Site will NOT be dropped."
+                  continue
+                fi
+
+                echo ""
+                echo "Backup files:"
+                ls -lh "${BACKUP_DIR}"
+
+                # -------------------------------------------------
+                # STEP 3: UPLOAD BACKUP TO S3
+                # -------------------------------------------------
+
+                echo ""
+                echo "Step 3: Uploading backup to S3"
+
+                aws s3 cp \
+                  "${BACKUP_DIR}/" \
+                  "${S3_PATH}" \
+                  --recursive
+
+                UPLOAD_STATUS=$?
+
+                if [ "${UPLOAD_STATUS}" -ne 0 ]; then
+                  echo "ERROR: S3 upload failed for ${SITE_NAME}."
+                  echo "Site will NOT be dropped."
+                  continue
+                fi
+
+                echo "S3 upload completed successfully for ${SITE_NAME}."
+
+                # -------------------------------------------------
+                # STEP 4: VERIFY S3 BACKUP
+                # -------------------------------------------------
+
+                echo ""
+                echo "Step 4: Verifying S3 backup"
+
+                aws s3 ls "${S3_PATH}"
+
+                VERIFY_STATUS=$?
+
+                if [ "${VERIFY_STATUS}" -ne 0 ]; then
+                  echo "ERROR: S3 backup verification failed for ${SITE_NAME}."
+                  echo "Site will NOT be dropped."
+                  continue
+                fi
+
+                echo "S3 backup verification completed successfully."
+
+                # -------------------------------------------------
+                # STEP 5: DROP SITE
+                # -------------------------------------------------
+
+                echo ""
+                echo "Step 5: Dropping site ${SITE_NAME}"
+
+                bench drop-site "${SITE_NAME}" \
+                  --root-login="${DB_ROOT_USER}" \
+                  --root-password="${DB_ROOT_PASSWORD}" \
+                  --archived-sites-path=archived_sites \
+                  --no-backup \
+                  {{- if .Values.jobs.dropMultipleSites.forced }}
+                  --force
+                  {{- end }}
+
+                DROP_STATUS=$?
+
+                if [ "${DROP_STATUS}" -eq 0 ]; then
+                  echo ""
+                  echo "SUCCESS: Site ${SITE_NAME} has been dropped."
+                  echo "Backup available at:"
+                  echo "${S3_PATH}"
+                else
+                  echo ""
+                  echo "ERROR: Failed to drop site ${SITE_NAME}."
+                  echo "Backup is preserved at:"
+                  echo "${S3_PATH}"
+                  continue
+                fi
+
+              done
+
+              echo ""
+              echo "========================================="
+              echo "MULTIPLE SITE DROP OPERATION COMPLETED"
+              echo "========================================="
+
+          env:
+
+            # -----------------------------------------------------
+            # DATABASE HOST
+            # -----------------------------------------------------
+
+            - name: DB_HOST
+              {{- if or .Values.mariadb.enabled (get .Values "mariadb-subchart").enabled }}
+              value: {{ .Release.Name }}-mariadb-subchart
+
+              {{- else if or .Values.postgresql.enabled (get .Values "postgresql-subchart").enabled }}
+              value: {{ .Release.Name }}-postgresql-subchart
+
+              {{- else if (get .Values "mariadb-sts").enabled }}
+              value: {{ include "erpnext.fullname" . }}-mariadb-sts
+
+              {{- else if (get .Values "postgresql-sts").enabled }}
+              value: {{ include "erpnext.fullname" . }}-postgresql-sts
+
+              {{- else }}
+              value: "{{ .Values.dbHost }}"
+              {{- end }}
+
+            # -----------------------------------------------------
+            # DATABASE ROOT USER
+            # -----------------------------------------------------
+
+            - name: DB_ROOT_USER
+              {{- if or .Values.mariadb.enabled (get .Values "mariadb-subchart").enabled }}
+              value: "root"
+
+              {{- else if or .Values.postgresql.enabled (get .Values "postgresql-subchart").enabled }}
+              value: "postgres"
+
+              {{- else }}
+              value: "{{ .Values.dbRootUser }}"
+              {{- end }}
+
+            # -----------------------------------------------------
+            # DATABASE ROOT PASSWORD
+            # -----------------------------------------------------
+
+            - name: DB_ROOT_PASSWORD
+              {{- if (get .Values "mariadb-sts").enabled }}
+              valueFrom:
+                secretKeyRef:
+                  key: mariadb-root-password
+                  name: {{ template "erpnext.fullname" . }}
+
+              {{- else if (get .Values "postgresql-sts").enabled }}
+              valueFrom:
+                secretKeyRef:
+                  key: postgres-password
+                  name: {{ template "erpnext.fullname" . }}
+
+              {{- else if or .Values.mariadb.enabled (get .Values "mariadb-subchart").enabled }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-mariadb-subchart
+                  key: mariadb-root-password
+
+              {{- else if or .Values.postgresql.enabled (get .Values "postgresql-subchart").enabled }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-postgresql-subchart
+                  key: postgres-password
+
+              {{- else if .Values.dbExistingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  key: {{ .Values.dbExistingSecretPasswordKey }}
+                  name: {{ .Values.dbExistingSecret }}
+
+              {{- else if .Values.dbRootPassword }}
+              valueFrom:
+                secretKeyRef:
+                  key: db-root-password
+                  name: {{ template "erpnext.fullname" . }}
+
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  key: db-root-password
+                  name: {{ template "erpnext.fullname" . }}
+              {{- end }}
+
+            # -----------------------------------------------------
+            # S3 CONFIGURATION
+            # -----------------------------------------------------
+
+            - name: S3_BUCKET
+              value: {{ .Values.jobs.dropMultipleSites.s3.bucket | quote }}
+
+            - name: S3_PREFIX
+              value: {{ .Values.jobs.dropMultipleSites.s3.prefix | quote }}
+
+            - name: AWS_DEFAULT_REGION
+              value: {{ .Values.jobs.dropMultipleSites.s3.region | quote }}
+
+          envFrom:
+            - secretRef:
+                name: {{ .Values.jobs.dropMultipleSites.s3.existingSecret | quote }}
+
+          resources:
+            {{- toYaml .Values.jobs.dropMultipleSites.resources | nindent 12 }}
+
+          securityContext:
+            {{- toYaml $.Values.securityContext | nindent 12 }}
+
+          volumeMounts:
+
+            - name: sites-dir
+              mountPath: /home/frappe/frappe-bench/sites
+
+            - name: logs
+              mountPath: /home/frappe/frappe-bench/logs
+
+            - name: shared
+              mountPath: /shared
+
       restartPolicy: Never
+
       volumes:
+
+        # ---------------------------------------------------------
+        # FRAPPE SITES
+        # ---------------------------------------------------------
+
         - name: sites-dir
           {{- if .Values.persistence.worker.enabled }}
+
           persistentVolumeClaim:
             {{- if .Values.persistence.worker.existingClaim }}
             claimName: {{ .Values.persistence.worker.existingClaim }}
@@ -109,11 +336,20 @@ spec:
             claimName: {{ template "erpnext.fullname" . }}
             {{- end }}
             readOnly: false
+
           {{- else }}
+
           emptyDir: {}
+
           {{- end }}
+
+        # ---------------------------------------------------------
+        # LOGS
+        # ---------------------------------------------------------
+
         - name: logs
           {{- if .Values.persistence.logs.enabled }}
+
           persistentVolumeClaim:
             {{- if .Values.persistence.logs.existingClaim }}
             claimName: {{ .Values.persistence.logs.existingClaim }}
@@ -121,19 +357,45 @@ spec:
             claimName: {{ template "erpnext.fullname" . }}-logs
             {{- end }}
             readOnly: false
+
           {{- else }}
+
           emptyDir: {}
+
           {{- end }}
+
+        # ---------------------------------------------------------
+        # SHARED BACKUP DIRECTORY
+        # ---------------------------------------------------------
+
+        - name: shared
+          emptyDir: {}
+
+      # -----------------------------------------------------------
+      # NODE SELECTOR
+      # -----------------------------------------------------------
+
       {{- with .Values.jobs.dropMultipleSites.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+
+      # -----------------------------------------------------------
+      # AFFINITY
+      # -----------------------------------------------------------
+
       {{- with .Values.jobs.dropMultipleSites.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+
+      # -----------------------------------------------------------
+      # TOLERATIONS
+      # -----------------------------------------------------------
+
       {{- with .Values.jobs.dropMultipleSites.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+
 {{- end }}

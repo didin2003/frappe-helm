@@ -368,10 +368,10 @@ jobs:
     # jobName: ""
     enabled: false
     forceCreate: false
-    siteName: "erp.cluster.local"
-    adminPassword: "changeit"
-    adminExistingSecret: ""
-    adminExistingSecretKey: "password"
+    siteName: "erp.demo.demo"
+    adminPassword: ""
+    adminExistingSecret: "frappe-secret"
+    adminExistingSecretKey: "admin-password"
     installApps:
     - "erpnext"
     dbType: "mariadb"
@@ -419,7 +419,14 @@ jobs:
     # jobName: ""
     enabled: false
     forced: false
-    siteName: "multi.test"
+    siteName: "erp.demo.demo"
+
+    s3:
+      bucket: "biz-backups"
+      prefix: "frappe-backups"
+      region: "us-east-1"
+      existingSecret: "frappe-s3-credentials"
+
     backoffLimit: 0
     resources: {}
     nodeSelector: {}
@@ -428,15 +435,21 @@ jobs:
 
   dropMultipleSites:
     # jobName: ""
-    enabled: false
+    enabled: true
 
     # Force deletion of sites without confirmation
     forced: false
 
     # List of sites to be dropped
     sites:
-    - name: "site1.example.com"
-    - name: "site2.example.com"
+      - name: "erp.demo.demo"
+      - name: "site2.example.com"
+
+    s3:
+      bucket: "biz-backups"
+      prefix: "frappe-backups"
+      region: "us-east-1"
+      existingSecret: "frappe-s3-credentials"
 
     backoffLimit: 0
     resources: {}

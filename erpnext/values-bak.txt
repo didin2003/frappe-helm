@@ -1,3 +1,4 @@
+
 # Default values for erpnext.
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
@@ -210,27 +211,6 @@ worker:
         - -c
         - |-
           echo "Pinging backing services";
-          {{- if (index .Values "mariadb-sts").enabled }}
-          wait-for-it {{ include "erpnext.fullname" . }}-mariadb-sts:3306 -t 1;
-          {{- else if (index .Values "postgresql-sts").enabled }}
-          wait-for-it {{ include "erpnext.fullname" . }}-postgresql-sts:5432 -t 1;
-          {{- else if or .Values.mariadb.enabled (get .Values "mariadb-subchart").enabled }}
-          (
-            wait-for-it {{ .Release.Name }}-mariadb-subchart:3306 -t 0 || \
-            wait-for-it {{ .Release.Name }}-mariadb:3306 -t 0 || \
-            wait-for-it {{ .Release.Name }}-mariadb-subchart-primary:3306 -t 0 || \
-            wait-for-it {{ .Release.Name }}-mariadb-primary:3306 -t 1
-          )
-          {{- else if or .Values.postgresql.enabled (get .Values "postgresql-subchart").enabled }}
-          (
-            wait-for-it {{ .Release.Name }}-postgresql-subchart:5432 -t 0 || \
-            wait-for-it {{ .Release.Name }}-postgresql:5432 -t 1
-          )
-          {{- else if or .Values.postgresql.enabled (index .Values "postgresql-subchart").enabled }}
-          wait-for-it {{ .Release.Name }}-postgresql-subchart:5432 -t 1;
-          {{- else if .Values.dbHost }}
-          wait-for-it {{ .Values.dbHost }}:{{ .Values.dbPort }} -t 1;
-          {{- end }}
           {{- if .Values.externalRedis.cache }}
           wait-for-it $(echo {{ .Values.externalRedis.cache }} | sed 's,redis://,,') -t 1;
           {{- else if (index .Values "valkey-cache").enabled }}
@@ -252,6 +232,7 @@ worker:
     initialDelaySeconds: 15
     periodSeconds: 5
     timeoutSeconds: 5
+
 
 socketio:
   podAnnotations: {}
@@ -302,18 +283,32 @@ persistence:
 
 # Ingress
 ingress:
-  # ingressName: ""
-  # className: ""
-  enabled: false
+  ingressName: ""
+  className: nginx
+  enabled: true
   annotations: {}
     # kubernetes.io/ingress.class: nginx
     # kubernetes.io/tls-acme: "true"
     # cert-manager.io/cluster-issuer: letsencrypt-prod
   hosts:
-  - host: erp.cluster.local
+  - host: didin.test
     paths:
     - path: /
-      pathType: ImplementationSpecific
+      pathType: Prefix
+  - host: manu.test
+    paths:
+      - path: /
+        pathType: Prefix
+
+  - host: multi.test
+    paths:
+      - path: /
+        pathType: Prefix
+
+  - host: multiple.site
+    paths:
+      - path: /
+        pathType: Prefix
   tls: []
   #  - secretName: auth-server-tls
   #    hosts:
@@ -373,10 +368,10 @@ jobs:
     # jobName: ""
     enabled: false
     forceCreate: false
-    siteName: "erp.cluster.local"
-    adminPassword: "changeit"
-    adminExistingSecret: ""
-    adminExistingSecretKey: "password"
+    siteName: "erp.demo.demo"
+    adminPassword: ""
+    adminExistingSecret: "frappe-secret"
+    adminExistingSecretKey: "admin-password"
     installApps:
     - "erpnext"
     dbType: "mariadb"
@@ -388,16 +383,16 @@ jobs:
 
   createMultipleSites:
     # jobName: ""
-    enabled: true
+    enabled: false
     forceCreate: false
     sites:
-    - name: "didin.test"
+    - name: "multi.test"
       installApps:
       - "erpnext"
-      # - name: "accounts.cluster.local"
-      #   installApps:
-      #     - "erpnext"
-      #     - "payments"
+      - "hrms"
+    - name: "multiple.site"
+      installApps:
+      - "erpnext"
     adminPassword: ""
     adminExistingSecret: "frappe-secret"
     adminExistingSecretKey: "admin-password"
@@ -424,7 +419,14 @@ jobs:
     # jobName: ""
     enabled: false
     forced: false
-    siteName: "erp.cluster.local"
+    siteName: "erp.demo.demo"
+
+    s3:
+      bucket: "biz-backups"
+      prefix: "frappe-backups"
+      region: "us-east-1"
+      existingSecret: "frappe-s3-credentials"
+
     backoffLimit: 0
     resources: {}
     nodeSelector: {}
@@ -433,15 +435,21 @@ jobs:
 
   dropMultipleSites:
     # jobName: ""
-    enabled: false
+    enabled: true
 
     # Force deletion of sites without confirmation
     forced: false
 
     # List of sites to be dropped
     sites:
-    - name: "site1.example.com"
-    - name: "site2.example.com"
+      - name: "erp.demo.demo"
+      - name: "site2.example.com"
+
+    s3:
+      bucket: "biz-backups"
+      prefix: "frappe-backups"
+      region: "us-east-1"
+      existingSecret: "frappe-s3-credentials"
 
     backoffLimit: 0
     resources: {}
@@ -466,31 +474,67 @@ jobs:
   backup:
     # jobName: ""
     enabled: false
-    siteName: "erp.cluster.local"
+    siteName: "multiple.site"
     withFiles: true
     backoffLimit: 0
+    s3:
+      enabled: true
+      bucket: "biz-backups"
+      region: "us-east-1"
+      prefix: "frappe-backups"
+      existingSecret: "frappe-s3-credentials"
     resources: {}
     nodeSelector: {}
     tolerations: []
     affinity: {}
 
   backupMultipleSites:
-    # jobName: ""
     enabled: false
-
-    # Include files directory in the backup
     withFiles: true
-
-    # List of sites to back up
-    sites:
-    - name: "erp.cluster.local"
-      # - name: "accounts.cluster.local"
-
     backoffLimit: 0
     resources: {}
     nodeSelector: {}
     tolerations: []
     affinity: {}
+
+  backupMultipleSitesCronJob:
+    enabled: false
+    schedule: "0 */6 * * *"
+    backoffLimit: 0
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # ------------------------------------------------------------------------------
+  # Restore jobs
+  #
+  # IMPORTANT:
+  # - Only ONE Restore job should be enabled at a time.
+  #
+  # Backward compatibility:
+  # - `Restore` remains unchanged for existing users.
+  #
+  # For restoring dont create the site through create site the Restore job will create the site 
+  # ------------------------------------------------------------------------------
+
+  restore:
+    enabled: false
+    siteName: "maneesh.test"
+
+    s3:
+      bucket: "biz-backups"
+      region: "us-east-1"
+      prefix: "frappe-backups"
+
+      databaseFile: "20261014_144053-manu_test-database.sql.gz"
+      publicFilesFile: "20261014_144053-manu_test-files.tar"
+      privateFilesFile: "20261014_144053-manu_test-private-files.tar"
+
+      existingSecret: "frappe-s3-credentials"
+
+    backoffLimit: 0
+
   # ------------------------------------------------------------------------------
   # Migrate jobs
   #
