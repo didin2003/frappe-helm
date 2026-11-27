@@ -62,9 +62,15 @@ spec:
             {{- if .Values.dbRds }}
             bench set-config -gp rds_db 1;
             {{- end}}
-            bench set-config -g redis_cache $REDIS_CACHE;
-            bench set-config -g redis_queue $REDIS_QUEUE;
-            bench set-config -g redis_socketio $REDIS_QUEUE;
+            CACHE_PASS_ESCAPED=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["REDIS_CACHE_PASSWORD"],safe=""))');
+            QUEUE_PASS_ESCAPED=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["REDIS_QUEUE_PASSWORD"],safe=""))');
+
+            REDIS_CACHE_URL="redis://${REDIS_CACHE_USERNAME}:${CACHE_PASS_ESCAPED}@${REDIS_CACHE_HOST}:${REDIS_CACHE_PORT}";
+            REDIS_QUEUE_URL="redis://${REDIS_QUEUE_USERNAME}:${QUEUE_PASS_ESCAPED}@${REDIS_QUEUE_HOST}:${REDIS_QUEUE_PORT}";
+
+            bench set-config -g redis_cache "$REDIS_CACHE_URL";
+            bench set-config -g redis_queue "$REDIS_QUEUE_URL";
+            bench set-config -g redis_socketio "$REDIS_QUEUE_URL";
             bench set-config -gp socketio_port $SOCKETIO_PORT;
         {{- end }}
         env:
@@ -89,8 +95,17 @@ spec:
             value: {{ .Values.dbPort | quote }}
             {{- end }}
           {{- if .Values.externalRedis.cache }}
-          - name: REDIS_CACHE
-            value: {{ .Values.externalRedis.cache | quote }}
+          - name: REDIS_CACHE_HOST
+            value: {{ .Values.externalRedis.cache.host | quote }}
+          - name: REDIS_CACHE_PORT
+            value: {{ .Values.externalRedis.cache.port | quote }}
+          - name: REDIS_CACHE_USERNAME
+            value: {{ .Values.externalRedis.cache.username | quote }}
+          - name: REDIS_CACHE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: external-redis-credentials
+                key: cache-password
           {{- else if (get .Values "valkey-cache").enabled }}
           - name: REDIS_CACHE
             value: redis://{{ .Release.Name }}-valkey-cache:6379
@@ -101,9 +116,19 @@ spec:
           - name: REDIS_CACHE
             value: redis://{{ .Release.Name }}-redis-cache-master:6379
           {{- end }}
+
           {{- if .Values.externalRedis.queue }}
-          - name: REDIS_QUEUE
-            value: {{ .Values.externalRedis.queue | quote }}
+          - name: REDIS_QUEUE_HOST
+            value: {{ .Values.externalRedis.queue.host | quote }}
+          - name: REDIS_QUEUE_PORT
+            value: {{ .Values.externalRedis.queue.port | quote }}
+          - name: REDIS_QUEUE_USERNAME
+            value: {{ .Values.externalRedis.queue.username | quote }}
+          - name: REDIS_QUEUE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: external-redis-credentials
+                key: queue-password
           {{- else if (get .Values "valkey-queue").enabled }}
           - name: REDIS_QUEUE
             value: redis://{{ .Release.Name }}-valkey-queue:6379

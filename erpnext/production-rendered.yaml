@@ -1,0 +1,933 @@
+---
+# Source: erpnext/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: production-erpnext
+  labels:
+
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+---
+# Source: erpnext/templates/pvc.yaml
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  labels:
+    app: erpnext
+    chart: erpnext-8.0.83
+    heritage: Helm
+    release: production
+  name: production-erpnext
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: "8Gi"
+  storageClassName: ceph-cephfs
+---
+# Source: erpnext/templates/service-gunicorn.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: production-erpnext-gunicorn
+  labels:
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: erpnext-gunicorn
+    app.kubernetes.io/instance: production-gunicorn
+---
+# Source: erpnext/templates/service-nginx.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: production-erpnext
+  labels:
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: erpnext-nginx
+    app.kubernetes.io/instance: production-nginx
+---
+# Source: erpnext/templates/service-socketio.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: production-erpnext-socketio
+  labels:
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9000
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: erpnext-socketio
+    app.kubernetes.io/instance: production-socketio
+---
+# Source: erpnext/templates/deployment-gunicorn.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: production-erpnext-gunicorn
+  labels:
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: erpnext-gunicorn
+      app.kubernetes.io/instance: production-gunicorn
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: erpnext-gunicorn
+        app.kubernetes.io/instance: production-gunicorn
+        app.kubernetes.io/app: frappe
+    spec:
+      serviceAccountName: production-erpnext
+      securityContext:
+        supplementalGroups:
+        - 1000
+      containers:
+        - name: gunicorn
+          args:
+            []
+          securityContext:
+            capabilities:
+              add:
+              - CAP_CHOWN
+          image: "didin8080/frappe-build-test:1"
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+          - name: sites-dir
+            mountPath: /home/frappe/frappe-bench/sites
+          - name: logs
+            mountPath: /home/frappe/frappe-bench/logs
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          livenessProbe:
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            tcpSocket:
+              port: 8000
+          readinessProbe:
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            tcpSocket:
+              port: 8000
+          resources:
+            {}
+      volumes:
+        - name: sites-dir
+          persistentVolumeClaim:
+            claimName: production-erpnext
+            readOnly: false
+        - name: logs
+          emptyDir: {}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: erpnext-gunicorn
+              app.kubernetes.io/instance: production-gunicorn
+---
+# Source: erpnext/templates/deployment-nginx.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: production-erpnext-nginx
+  labels:
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: erpnext-nginx
+      app.kubernetes.io/instance: production-nginx
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: erpnext-nginx
+        app.kubernetes.io/instance: production-nginx
+        app.kubernetes.io/app: frappe
+    spec:
+      serviceAccountName: production-erpnext
+      securityContext:
+        supplementalGroups:
+        - 1000
+      containers:
+        - name: nginx
+          args:
+          - nginx-entrypoint.sh
+          env:
+            - name: "BACKEND"
+              value: production-erpnext-gunicorn:8000
+            - name: "SOCKETIO"
+              value: production-erpnext-socketio:9000
+            - name: "UPSTREAM_REAL_IP_ADDRESS"
+              value: "127.0.0.1"
+            - name: "UPSTREAM_REAL_IP_RECURSIVE"
+              value: "off"
+            - name: "UPSTREAM_REAL_IP_HEADER"
+              value: X-Forwarded-For
+            - name: "FRAPPE_SITE_NAME_HEADER"
+              value: $host
+            - name: "PROXY_READ_TIMEOUT"
+              value: "120"
+            - name: "CLIENT_MAX_BODY_SIZE"
+              value: 50m
+          image: "didin8080/frappe-build-test:1"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            tcpSocket:
+              port: 8080
+          readinessProbe:
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            tcpSocket:
+              port: 8080
+          resources:
+            {}
+          securityContext:
+            capabilities:
+              add:
+              - CAP_CHOWN
+          volumeMounts:
+          - name: sites-dir
+            mountPath: /home/frappe/frappe-bench/sites
+      volumes:
+        - name: sites-dir
+          persistentVolumeClaim:
+            claimName: production-erpnext
+            readOnly: false
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: erpnext-nginx
+              app.kubernetes.io/instance: production-nginx
+---
+# Source: erpnext/templates/deployment-scheduler.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: production-erpnext-scheduler
+  labels:
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: erpnext-scheduler
+      app.kubernetes.io/instance: production-scheduler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: erpnext-scheduler
+        app.kubernetes.io/instance: production-scheduler
+        app.kubernetes.io/app: frappe
+    spec:
+      serviceAccountName: production-erpnext
+      securityContext:
+        supplementalGroups:
+        - 1000
+      containers:
+        - name: scheduler
+          args:
+          - bench
+          - schedule
+          image: "didin8080/frappe-build-test:1"
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            
+            exec:
+              command:
+                - bash
+                - -c
+                - |-
+                  echo "Pinging backing services";
+                  wait-for-it 192.168.1.151:13000 -t 1;
+                  wait-for-it 192.168.1.152:11000 -t 1;
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 5
+            
+          readinessProbe:
+            
+            exec:
+              command:
+                - bash
+                - -c
+                - |-
+                  echo "Pinging backing services";
+                  wait-for-it 192.168.1.151:13000 -t 1;
+                  wait-for-it 192.168.1.152:11000 -t 1;
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 5
+            
+          resources:
+            {}
+          securityContext:
+            capabilities:
+              add:
+              - CAP_CHOWN
+          volumeMounts:
+          - name: sites-dir
+            mountPath: /home/frappe/frappe-bench/sites
+          - name: logs
+            mountPath: /home/frappe/frappe-bench/logs
+      volumes:
+        - name: sites-dir
+          persistentVolumeClaim:
+            claimName: production-erpnext
+            readOnly: false
+        - name: logs
+          emptyDir: {}
+---
+# Source: erpnext/templates/deployment-socketio.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: production-erpnext-socketio
+  labels:
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: erpnext-socketio
+      app.kubernetes.io/instance: production-socketio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: erpnext-socketio
+        app.kubernetes.io/instance: production-socketio
+        app.kubernetes.io/app: frappe
+    spec:
+      serviceAccountName: production-erpnext
+      securityContext:
+        supplementalGroups:
+        - 1000
+      containers:
+        - name: socketio
+          args:
+            - node
+            - /home/frappe/frappe-bench/apps/frappe/socketio.js
+          securityContext:
+            capabilities:
+              add:
+              - CAP_CHOWN
+          image: "didin8080/frappe-build-test:1"
+          volumeMounts:
+          - name: sites-dir
+            mountPath: /home/frappe/frappe-bench/sites
+          - name: logs
+            mountPath: /home/frappe/frappe-bench/logs
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 9000
+              protocol: TCP
+          livenessProbe:
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            tcpSocket:
+              port: 9000
+          readinessProbe:
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            tcpSocket:
+              port: 9000
+          resources:
+            {}
+      volumes:
+        - name: sites-dir
+          persistentVolumeClaim:
+            claimName: production-erpnext
+            readOnly: false
+        - name: logs
+          emptyDir: {}
+---
+# Source: erpnext/templates/deployment-worker-default.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: production-erpnext-worker-d
+  labels:
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: erpnext-worker-d
+      app.kubernetes.io/instance: production-worker-d
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: erpnext-worker-d
+        app.kubernetes.io/instance: production-worker-d
+        app.kubernetes.io/app: frappe
+    spec:
+      serviceAccountName: production-erpnext
+      securityContext:
+        supplementalGroups:
+        - 1000
+      containers:
+        - name: default
+          args:
+          - bench
+          - worker
+          - --queue
+          - default
+          image: "didin8080/frappe-build-test:1"
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            
+            exec:
+              command:
+                - bash
+                - -c
+                - |-
+                  echo "Pinging backing services";
+                  wait-for-it 192.168.1.151:13000 -t 1;
+                  wait-for-it 192.168.1.152:11000 -t 1;
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 5
+            
+          readinessProbe:
+            
+            exec:
+              command:
+                - bash
+                - -c
+                - |-
+                  echo "Pinging backing services";
+                  wait-for-it 192.168.1.151:13000 -t 1;
+                  wait-for-it 192.168.1.152:11000 -t 1;
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 5
+            
+          resources:
+            {}
+          securityContext:
+            capabilities:
+              add:
+              - CAP_CHOWN
+          volumeMounts:
+          - name: sites-dir
+            mountPath: /home/frappe/frappe-bench/sites
+          - name: logs
+            mountPath: /home/frappe/frappe-bench/logs
+      volumes:
+        - name: sites-dir
+          persistentVolumeClaim:
+            claimName: production-erpnext
+            readOnly: false
+        - name: logs
+          emptyDir: {}
+---
+# Source: erpnext/templates/deployment-worker-long.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: production-erpnext-worker-l
+  labels:
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: erpnext-worker-l
+      app.kubernetes.io/instance: production-worker-l
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: erpnext-worker-l
+        app.kubernetes.io/instance: production-worker-l
+        app.kubernetes.io/app: frappe
+    spec:
+      serviceAccountName: production-erpnext
+      securityContext:
+        supplementalGroups:
+        - 1000
+      containers:
+        - name: long
+          args:
+          - bench
+          - worker
+          - --queue
+          - long,default,short
+          image: "didin8080/frappe-build-test:1"
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            
+            exec:
+              command:
+                - bash
+                - -c
+                - |-
+                  echo "Pinging backing services";
+                  wait-for-it 192.168.1.151:13000 -t 1;
+                  wait-for-it 192.168.1.152:11000 -t 1;
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 5
+            
+          readinessProbe:
+            
+            exec:
+              command:
+                - bash
+                - -c
+                - |-
+                  echo "Pinging backing services";
+                  wait-for-it 192.168.1.151:13000 -t 1;
+                  wait-for-it 192.168.1.152:11000 -t 1;
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 5
+            
+          resources:
+            {}
+          securityContext:
+            capabilities:
+              add:
+              - CAP_CHOWN
+          volumeMounts:
+          - name: sites-dir
+            mountPath: /home/frappe/frappe-bench/sites
+          - name: logs
+            mountPath: /home/frappe/frappe-bench/logs
+      volumes:
+        - name: sites-dir
+          persistentVolumeClaim:
+            claimName: production-erpnext
+            readOnly: false
+        - name: logs
+          emptyDir: {}
+---
+# Source: erpnext/templates/deployment-worker-short.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: production-erpnext-worker-s
+  labels:
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: erpnext-worker-s
+      app.kubernetes.io/instance: production-worker-s
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: erpnext-worker-s
+        app.kubernetes.io/instance: production-worker-s
+        app.kubernetes.io/app: frappe
+    spec:
+      serviceAccountName: production-erpnext
+      securityContext:
+        supplementalGroups:
+        - 1000
+      containers:
+        - name: short
+          args:
+          - bench
+          - worker
+          - --queue
+          - short,default
+          image: "didin8080/frappe-build-test:1"
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            
+            exec:
+              command:
+                - bash
+                - -c
+                - |-
+                  echo "Pinging backing services";
+                  wait-for-it 192.168.1.151:13000 -t 1;
+                  wait-for-it 192.168.1.152:11000 -t 1;
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 5
+            
+          readinessProbe:
+            
+            exec:
+              command:
+                - bash
+                - -c
+                - |-
+                  echo "Pinging backing services";
+                  wait-for-it 192.168.1.151:13000 -t 1;
+                  wait-for-it 192.168.1.152:11000 -t 1;
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 5
+            
+          resources:
+            {}
+          securityContext:
+            capabilities:
+              add:
+              - CAP_CHOWN
+          volumeMounts:
+          - name: sites-dir
+            mountPath: /home/frappe/frappe-bench/sites
+          - name: logs
+            mountPath: /home/frappe/frappe-bench/logs
+      volumes:
+        - name: sites-dir
+          persistentVolumeClaim:
+            claimName: production-erpnext
+            readOnly: false
+        - name: logs
+          emptyDir: {}
+---
+# Source: erpnext/templates/create-sites-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: erpnext-create-sites
+  namespace: production
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: enabled     # lets Flux recreate the Job when its spec changes
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext: {runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}   # copy from your gunicorn Deployment
+      initContainers:
+      - name: wait-for-config
+        image: didin8080/frappe-build-test:1
+        command: ["bash", "-c"]
+        args:
+        - |
+          for i in $(seq 1 120); do
+            jq -e '.db_host and .redis_cache and .redis_queue' sites/common_site_config.json >/dev/null 2>&1 && exit 0
+            echo "waiting for sites/common_site_config.json"; sleep 5
+          done
+          exit 1
+        volumeMounts:
+        - {name: sites-dir, mountPath: /home/frappe/frappe-bench/sites}
+      containers:
+      - name: create-sites
+        image: didin8080/frappe-build-test:1
+        imagePullPolicy: IfNotPresent
+        command: ["bash", "-c"]
+        args:
+        - |
+          set -uo pipefail
+          degraded=0
+          export LOCK_FILE=/home/frappe/frappe-bench/logs/proxysql-sync.lock
+          for SITE in ${SITES}; do
+            if [[ -f "sites/${SITE}/site_config.json" ]]; then
+              echo "Site ${SITE} already exists, skipping creation"
+            else
+              echo "Creating ${SITE} (direct to Galera)"
+              if ! bench new-site "${SITE}" \
+                    --no-mariadb-socket \
+                    --db-type="${DB_TYPE}" \
+                    --db-host="${GALERA_HOST}" --db-port="${GALERA_PORT}" \
+                    --admin-password="${ADMIN_PASSWORD}" \
+                    --mariadb-root-username="${DB_ROOT_USER}" \
+                    --mariadb-root-password="${DB_ROOT_PASSWORD}"; then
+                echo "ERROR: creation of ${SITE} failed"; degraded=1; continue
+              fi
+            fi
+            bash /scripts/finalize-site.sh "${SITE}" || { echo "WARN: ${SITE} not behind ProxySQL yet"; degraded=1; }
+          done
+          rm -f currentsite.txt
+          exit ${degraded}
+        env:
+        - {name: SITES,         value: "galera3.site galera4.site galera5.site proxytest.site"}   # edit this list to add sites
+        - {name: SCRIPTS_REV,   value: "1"}                          # bump to force a re-run after script changes
+        - {name: DB_TYPE,       value: mariadb}
+        - {name: DB_HOST,       value: proxysql.database.svc.cluster.local}
+        - {name: DB_PORT,       value: "6033"}
+        - {name: GALERA_HOST,   value: "192.168.0.203"}
+        - {name: GALERA_PORT,   value: "3306"}
+        - {name: PX_ADMIN_PORT, value: "6032"}
+        - {name: DB_ROOT_USER,  value: frappe_admin}
+        - name: DB_ROOT_PASSWORD
+          valueFrom: {secretKeyRef: {name: frappe-db-root, key: db-root-password}}
+        - name: ADMIN_PASSWORD
+          valueFrom: {secretKeyRef: {name: frappe-db-root, key: admin-password}}
+        - name: SYNC_USER
+          valueFrom: {secretKeyRef: {name: proxysql-sync, key: sync_user}}
+        - name: SYNC_PW
+          valueFrom: {secretKeyRef: {name: proxysql-sync, key: sync_password}}
+        - name: PX_ADMIN_USER
+          valueFrom: {secretKeyRef: {name: proxysql-sync, key: radmin_user}}
+        - name: PX_ADMIN_PW
+          valueFrom: {secretKeyRef: {name: proxysql-sync, key: radmin_password}}
+        volumeMounts:
+        - {name: sites-dir, mountPath: /home/frappe/frappe-bench/sites}
+        - {name: logs,      mountPath: /home/frappe/frappe-bench/logs}
+        - {name: scripts,   mountPath: /scripts}
+      volumes:
+      - name: sites-dir
+        persistentVolumeClaim: {claimName: erpnext-prod}     # verify: kubectl -n erpnext get pvc
+      - name: logs
+        emptyDir: {}
+      - name: scripts
+        configMap: {name: proxysql-scripts}
+---
+# Source: erpnext/templates/job-configure-bench.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: production-erpnext-conf-bench-20261127073149
+  labels:
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: production-erpnext
+      initContainers:
+      - name: frappe-bench-ownership
+        image: didin8080/frappe-build-test:1
+        imagePullPolicy: IfNotPresent
+        command: ['sh', '-c']
+        args:
+          - chown -R "1000:1000" /home/frappe/frappe-bench/sites /home/frappe/frappe-bench/logs
+        resources:
+          {}
+        securityContext:
+          # run as root to set ownership
+          runAsUser: 0
+        volumeMounts:
+          - name: sites-dir
+            mountPath: /home/frappe/frappe-bench/sites
+          - name: logs
+            mountPath: /home/frappe/frappe-bench/logs
+      securityContext:
+        supplementalGroups:
+        - 1000
+      containers:
+      - name: configure
+        image: "didin8080/frappe-build-test:1"
+        imagePullPolicy: IfNotPresent
+        command:
+          - bash
+          - -c
+        args:
+          - >
+            ls -1 apps > sites/apps.txt;
+            [[ -f sites/common_site_config.json ]] || echo "{}" > sites/common_site_config.json;
+            bench set-config -gp db_port $DB_PORT;
+            bench set-config -g db_host $DB_HOST;
+            CACHE_PASS_ESCAPED=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["REDIS_CACHE_PASSWORD"],safe=""))');
+            QUEUE_PASS_ESCAPED=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["REDIS_QUEUE_PASSWORD"],safe=""))');
+
+            REDIS_CACHE_URL="redis://${REDIS_CACHE_USERNAME}:${CACHE_PASS_ESCAPED}@${REDIS_CACHE_HOST}:${REDIS_CACHE_PORT}";
+            REDIS_QUEUE_URL="redis://${REDIS_QUEUE_USERNAME}:${QUEUE_PASS_ESCAPED}@${REDIS_QUEUE_HOST}:${REDIS_QUEUE_PORT}";
+
+            bench set-config -g redis_cache "$REDIS_CACHE_URL";
+            bench set-config -g redis_queue "$REDIS_QUEUE_URL";
+            bench set-config -g redis_socketio "$REDIS_QUEUE_URL";
+            bench set-config -gp socketio_port $SOCKETIO_PORT;
+        env:
+          - name: DB_HOST
+            value: "proxysql.database.svc.cluster.local"
+          - name: DB_PORT
+            value: "6033"
+          - name: REDIS_CACHE_HOST
+            value: "192.168.1.151"
+          - name: REDIS_CACHE_PORT
+            value: "13000"
+          - name: REDIS_CACHE_USERNAME
+            value: "default"
+          - name: REDIS_CACHE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: external-redis-credentials
+                key: cache-password
+          - name: REDIS_QUEUE_HOST
+            value: "192.168.1.152"
+          - name: REDIS_QUEUE_PORT
+            value: "11000"
+          - name: REDIS_QUEUE_USERNAME
+            value: "default"
+          - name: REDIS_QUEUE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: external-redis-credentials
+                key: queue-password
+          - name: SOCKETIO_PORT
+            value: "9000"
+        resources:
+          {}
+        volumeMounts:
+          - name: sites-dir
+            mountPath: /home/frappe/frappe-bench/sites
+          - name: logs
+            mountPath: /home/frappe/frappe-bench/logs
+      restartPolicy: Never
+      volumes:
+        - name: sites-dir
+          persistentVolumeClaim:
+            claimName: production-erpnext
+            readOnly: false
+        - name: logs
+          emptyDir: {}
+---
+# Source: erpnext/templates/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: production-erpnext
+  labels:
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: "didin.test"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: production-erpnext
+                port:
+                  number: 8080
+    - host: "manu.test"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: production-erpnext
+                port:
+                  number: 8080
+    - host: "multi.test"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: production-erpnext
+                port:
+                  number: 8080
+    - host: "multiple.site"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: production-erpnext
+                port:
+                  number: 8080
+---
+# Source: erpnext/templates/tests/test-connection.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "production-erpnext-test-connection"
+  labels:
+
+    helm.sh/chart: erpnext-8.0.83
+    app.kubernetes.io/name: erpnext
+    app.kubernetes.io/instance: production
+    app.kubernetes.io/version: "v16.37.0"
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    "helm.sh/hook": test-success
+spec:
+  containers:
+    - name: wget
+      image: busybox
+      command: ['wget']
+      args:  ['production-erpnext:8080']
+  restartPolicy: Never

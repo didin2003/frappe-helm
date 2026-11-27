@@ -3,19 +3,34 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-# Configure external database host
-dbHost: "192.168.0.127"
-dbPort: 3306
-dbRootUser: "frappe"
+# External database via ProxySQL
+dbHost: "proxysql.database.svc.cluster.local"
+dbPort: 6033
+dbRootUser: "frappe_admin"
 dbRootPassword: ""
 dbRds: false
-dbExistingSecret: "frappe-secret"
+dbExistingSecret: "frappe-db-root"
 dbExistingSecretPasswordKey: "db-root-password"
+
+# Direct Galera connection for site creation
+galeraHost: "192.168.0.203"
+galeraPort: 3306
+
+# ---- Secret holding the ProxySQL sync credentials (must exist in this release's namespace) ----
+# keys: sync_user, sync_password, radmin_user, radmin_password
+proxysqlSync:
+  existingSecret: "proxysql-sync"
 
 # Configure external redis host
 externalRedis:
-  cache: ""
-  queue: ""
+  cache:
+    host: "192.168.1.151"
+    port: 13000
+    username: "default"
+  queue:
+    host: "192.168.1.152"
+    port: 11000
+    username: "default"
 
 image:
   repository: didin8080/frappe-build-test
@@ -212,7 +227,7 @@ worker:
         - |-
           echo "Pinging backing services";
           {{- if .Values.externalRedis.cache }}
-          wait-for-it $(echo {{ .Values.externalRedis.cache }} | sed 's,redis://,,') -t 1;
+          wait-for-it {{ .Values.externalRedis.cache.host }}:{{ .Values.externalRedis.cache.port }} -t 1;
           {{- else if (index .Values "valkey-cache").enabled }}
           wait-for-it {{ .Release.Name }}-valkey-cache:6379 -t 1;
           {{- else if (index .Values "dragonfly-cache").enabled }}
@@ -221,7 +236,7 @@ worker:
           wait-for-it {{ .Release.Name }}-redis-cache-master:6379 -t 1;
           {{- end }}
           {{- if .Values.externalRedis.queue }}
-          wait-for-it $(echo {{ .Values.externalRedis.queue }} | sed 's,redis://,,') -t 1;
+          wait-for-it {{ .Values.externalRedis.queue.host }}:{{ .Values.externalRedis.queue.port }} -t 1;
           {{- else if (index .Values "valkey-queue").enabled }}
           wait-for-it {{ .Release.Name }}-valkey-queue:6379 -t 1;
           {{- else if (index .Values "dragonfly-queue").enabled }}
@@ -269,9 +284,9 @@ persistence:
     enabled: true
     # existingClaim: ""
     size: 8Gi
-    storageClass: "local-path"
+    storageClass: "ceph-cephfs"
     accessModes:
-    - ReadWriteOnce
+    - ReadWriteMany
   logs:
     # Container based log search and analytics stack recommended
     enabled: false
@@ -370,7 +385,7 @@ jobs:
     forceCreate: false
     siteName: "erp.demo.demo"
     adminPassword: ""
-    adminExistingSecret: "frappe-secret"
+    adminExistingSecret: "frappe-db-root"
     adminExistingSecretKey: "admin-password"
     installApps:
     - "erpnext"
@@ -394,7 +409,7 @@ jobs:
       installApps:
       - "erpnext"
     adminPassword: ""
-    adminExistingSecret: "frappe-secret"
+    adminExistingSecret: "frappe-db-root"
     adminExistingSecretKey: "admin-password"
     dbType: "mariadb"
     backoffLimit: 0
@@ -435,7 +450,7 @@ jobs:
 
   dropMultipleSites:
     # jobName: ""
-    enabled: true
+    enabled: false
 
     # Force deletion of sites without confirmation
     forced: false
@@ -734,7 +749,7 @@ redis-queue:
 valkey-cache:
   # To enable the official Valkey subchart for cache, set enabled to true
   # and set dragonfly-cache.enabled and redis-cache.enabled to false.
-  enabled: true
+  enabled: false
   image:
     repository: valkey/valkey
     tag: "7.2" # check for latest version
@@ -743,7 +758,7 @@ valkey-cache:
 valkey-queue:
   # To enable the official Valkey subchart for queue, set enabled to true
   # and set dragonfly-queue.enabled and redis-queue.enabled to false.
-  enabled: true
+  enabled: false
   image:
     repository: valkey/valkey
     tag: "7.2" # check for latest version
