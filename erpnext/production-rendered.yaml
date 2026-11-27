@@ -665,6 +665,109 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
+  name: erpnext-create-sites-v2
+  namespace: production
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: enabled     # lets Flux recreate the Job when its spec changes
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext: {runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}   # copy from your gunicorn Deployment
+      initContainers:
+      - name: wait-for-config
+        image: didin8080/frappe-build-test:1
+        command: ["bash", "-c"]
+        args:
+        - |
+          for i in $(seq 1 120); do
+            jq -e '.db_host and .redis_cache and .redis_queue' sites/common_site_config.json >/dev/null 2>&1 && exit 0
+            echo "waiting for sites/common_site_config.json"; sleep 5
+          done
+          exit 1
+        volumeMounts:
+        - {name: sites-dir, mountPath: /home/frappe/frappe-bench/sites}
+      containers:
+      - name: create-sites
+        image: didin8080/frappe-build-test:1
+        imagePullPolicy: IfNotPresent
+        command: ["bash", "-c"]
+        args:
+        - |
+          set -uo pipefail
+          degraded=0
+          export LOCK_FILE=/home/frappe/frappe-bench/logs/proxysql-sync.lock
+          for SITE in ${SITES}; do
+            if [[ -f "sites/${SITE}/site_config.json" ]]; then
+              echo "Site ${SITE} already exists, skipping creation"
+            else
+              echo "Creating ${SITE} (direct to Galera)"
+              if ! bench new-site "${SITE}" \
+                    --no-mariadb-socket \
+                    --db-type="${DB_TYPE}" \
+                    --db-host="${GALERA_HOST}" --db-port="${GALERA_PORT}" \
+                    --admin-password="${ADMIN_PASSWORD}" \
+                    --mariadb-root-username="${DB_ROOT_USER}" \
+                    --mariadb-root-password="${DB_ROOT_PASSWORD}"; then
+                echo "ERROR: creation of ${SITE} failed"; degraded=1; continue
+              fi
+            fi
+            bash /scripts/finalize-site.sh "${SITE}" || { echo "WARN: ${SITE} not behind ProxySQL yet"; degraded=1; }
+
+            for APP in erpnext hrms payments; do
+              if bench --site "${SITE}" list-apps | grep -qx "${APP}"; then
+                echo "${APP} already installed on ${SITE}, skipping"
+              else
+                echo "Installing ${APP} on ${SITE}"
+                if ! bench --site "${SITE}" install-app "${APP}"; then
+                  echo "ERROR: Failed to install ${APP} on ${SITE}"
+                  degraded=1
+                fi
+              fi
+            done
+          done
+          rm -f currentsite.txt
+          exit ${degraded}
+        env:
+        - {name: SITES,         value: "galera3.site galera4.site galera5.site proxytest.site"}   # edit this list to add sites
+        - {name: SCRIPTS_REV,   value: "1"}                          # bump to force a re-run after script changes
+        - {name: DB_TYPE,       value: mariadb}
+        - {name: DB_HOST,       value: proxysql.database.svc.cluster.local}
+        - {name: DB_PORT,       value: "6033"}
+        - {name: GALERA_HOST,   value: "192.168.0.203"}
+        - {name: GALERA_PORT,   value: "3306"}
+        - {name: PX_ADMIN_PORT, value: "6032"}
+        - {name: DB_ROOT_USER,  value: frappe_admin}
+        - name: DB_ROOT_PASSWORD
+          valueFrom: {secretKeyRef: {name: frappe-db-root, key: db-root-password}}
+        - name: ADMIN_PASSWORD
+          valueFrom: {secretKeyRef: {name: frappe-db-root, key: admin-password}}
+        - name: SYNC_USER
+          valueFrom: {secretKeyRef: {name: proxysql-sync, key: sync_user}}
+        - name: SYNC_PW
+          valueFrom: {secretKeyRef: {name: proxysql-sync, key: sync_password}}
+        - name: PX_ADMIN_USER
+          valueFrom: {secretKeyRef: {name: proxysql-sync, key: radmin_user}}
+        - name: PX_ADMIN_PW
+          valueFrom: {secretKeyRef: {name: proxysql-sync, key: radmin_password}}
+        volumeMounts:
+        - {name: sites-dir, mountPath: /home/frappe/frappe-bench/sites}
+        - {name: logs,      mountPath: /home/frappe/frappe-bench/logs}
+        - {name: scripts,   mountPath: /scripts}
+      volumes:
+      - name: sites-dir
+        persistentVolumeClaim:
+          claimName: production-erpnext     # verify: kubectl -n erpnext get pvc
+      - name: logs
+        emptyDir: {}
+      - name: scripts
+        configMap: {name: proxysql-scripts}
+---
+# Source: erpnext/templates/create-sites-job.yaml.save
+apiVersion: batch/v1
+kind: Job
+metadata:
   name: erpnext-create-sites
   namespace: production
   annotations:
@@ -714,7 +817,8 @@ spec:
               fi
             fi
             bash /scripts/finalize-site.sh "${SITE}" || { echo "WARN: ${SITE} not behind ProxySQL yet"; degraded=1; }
-          done
+            
+
           rm -f currentsite.txt
           exit ${degraded}
         env:
@@ -745,7 +849,8 @@ spec:
         - {name: scripts,   mountPath: /scripts}
       volumes:
       - name: sites-dir
-        persistentVolumeClaim: {claimName: erpnext-prod}     # verify: kubectl -n erpnext get pvc
+        persistentVolumeClaim:
+          claimName: production-erpnext     # verify: kubectl -n erpnext get pvc
       - name: logs
         emptyDir: {}
       - name: scripts
@@ -755,7 +860,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: production-erpnext-conf-bench-20261127073149
+  name: production-erpnext-conf-bench-20261127102745
   labels:
     helm.sh/chart: erpnext-8.0.83
     app.kubernetes.io/name: erpnext

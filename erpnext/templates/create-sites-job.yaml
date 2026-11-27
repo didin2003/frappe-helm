@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: erpnext-create-sites
+  name: erpnext-create-sites-v2
   namespace: production
   annotations:
     kustomize.toolkit.fluxcd.io/force: enabled     # lets Flux recreate the Job when its spec changes
@@ -50,6 +50,18 @@ spec:
               fi
             fi
             bash /scripts/finalize-site.sh "${SITE}" || { echo "WARN: ${SITE} not behind ProxySQL yet"; degraded=1; }
+
+            for APP in erpnext hrms payments; do
+              if bench --site "${SITE}" list-apps | grep -qx "${APP}"; then
+                echo "${APP} already installed on ${SITE}, skipping"
+              else
+                echo "Installing ${APP} on ${SITE}"
+                if ! bench --site "${SITE}" install-app "${APP}"; then
+                  echo "ERROR: Failed to install ${APP} on ${SITE}"
+                  degraded=1
+                fi
+              fi
+            done
           done
           rm -f currentsite.txt
           exit ${degraded}
@@ -81,7 +93,8 @@ spec:
         - {name: scripts,   mountPath: /scripts}
       volumes:
       - name: sites-dir
-        persistentVolumeClaim: {claimName: erpnext-prod}     # verify: kubectl -n erpnext get pvc
+        persistentVolumeClaim:
+          claimName: production-erpnext     # verify: kubectl -n erpnext get pvc
       - name: logs
         emptyDir: {}
       - name: scripts
