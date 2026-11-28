@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: erpnext-create-sites-v2
+  name: erpnext-create-sites-v4
   namespace: production
   annotations:
     kustomize.toolkit.fluxcd.io/force: enabled     # lets Flux recreate the Job when its spec changes
@@ -66,7 +66,7 @@ spec:
           rm -f currentsite.txt
           exit ${degraded}
         env:
-        - {name: SITES,         value: "production.test"}   # edit this list to add sites
+        - {name: SITES,         value: "production1.test"}   # edit this list to add sites
         - {name: SCRIPTS_REV,   value: "1"}                          # bump to force a re-run after script changes
         - {name: DB_TYPE,       value: mariadb}
         - {name: DB_HOST,       value: proxysql.database.svc.cluster.local}

@@ -218,6 +218,14 @@ cd frappe-helm
 ```bash
 kubectl create namespace erpnext
 ```
+add the privilege for thr namespace
+
+```bash
+kubectl label ns erpnext \
+  pod-security.kubernetes.io/enforce=privileged \
+  pod-security.kubernetes.io/warn=privileged \
+  pod-security.kubernetes.io/audit=privileged --overwrite
+```
 
 If the namespace already exists, Kubernetes will report that it is already present.
 
@@ -229,12 +237,22 @@ kubectl get namespace erpnext
 
 ### 3. Configure Database Credentials
 
-Create a Kubernetes Secret containing the database root password.
+Create a Kubernetes Secret containing the database root password and the admin password.
 
 ```bash
 kubectl create secret generic frappe-secret \
   --namespace erpnext \
-  --from-literal=db-root-password='YOUR_DATABASE_ROOT_PASSWORD'
+  --from-literal=db-root-password='YOUR_DATABASE_ROOT_PASSWORD' \
+  --from-literal=admin-password='admin_password'
+```
+
+Create a Kubernetes Secret containing the Redis Cache password and Queue Password.
+
+```bash
+kubectl create secret generic external-redis-credentials \
+  -n erpnext \
+  --from-literal=cache-password='YOUR_CACHE_PASSWORD' \
+  --from-literal=queue-password='YOUR_QUEUE_PASSWORD'
 ```
 
 Verify:
@@ -243,6 +261,15 @@ Verify:
 kubectl get secret frappe-secret -n erpnext
 ```
 
+Create and Kubernetes Secret containining the sync_user, sync_password, radmin_user and radmin_password.
+
+```bash
+kubectl create secret generic proxysql-sync -n production \
+  --from-literal=sync_user='<sync-user>' \
+  --from-literal=sync_password='<sync-password>' \
+  --from-literal=radmin_user='<radmin-user>' \
+  --from-literal=radmin_password='<radmin-password>'
+```
 > Replace the example password with your actual database password. Avoid committing passwords to Git.
 
 ### 4. Verify Database Connectivity
@@ -275,24 +302,41 @@ image:
 Configure the external MariaDB/Galera endpoint.
 
 ```yaml
-mariadb:
-  enabled: false
-  host: 192.168.0.127
-  port: 3306
+# External database via ProxySQL
+dbHost: "proxysql.database.svc.cluster.local"
+dbPort: 6033
+dbRootUser: "frappe_admin"
+dbRootPassword: ""
+dbRds: false
+dbExistingSecret: "frappe-secret"
+dbExistingSecretPasswordKey: "db-root-password"
+
+# Direct Galera connection for site creation
+galeraHost: "192.168.0.203"  #VIP for the Shared galera
+galeraPort: 3306
+
+# ---- Secret holding the ProxySQL sync credentials (must exist in this release's namespace) ----
+# keys: sync_user, sync_password, radmin_user, radmin_password
+proxysqlSync:
+  existingSecret: "proxysql-sync"
 ```
 
 The database root password is provided through the Kubernetes Secret.
 
 ### Valkey/Redis Configuration
 
-Configure the cache and queue endpoints according to the chart's Redis/Valkey values.
+Configure the external redis cache and queue endpoints according to the chart's Redis/Valkey values.
 
 ```yaml
-redis-cache:
-  enabled: true
-
-redis-queue:
-  enabled: true
+externalRedis:
+  cache:
+    host: "192.168.1.151"
+    port: 13000
+    username: "default"
+  queue:
+    host: "192.168.1.152"
+    port: 11000
+    username: "default"
 ```
 
 > Use the actual Redis/Valkey configuration keys defined in the current `values.yaml`.
@@ -305,10 +349,11 @@ Example worker PVC configuration:
 persistence:
   worker:
     enabled: true
+    # existingClaim: ""
     size: 8Gi
+    storageClass: "ceph-cephfs"
     accessModes:
-      - ReadWriteOnce
-    storageClass: local-path
+    - ReadWriteMany
 ```
 
 Verify the available StorageClasses:

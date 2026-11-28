@@ -320,7 +320,7 @@ ingress:
       - path: /
         pathType: Prefix
 
-  - host: multiple.site
+  - host: production1.test
     paths:
       - path: /
         pathType: Prefix
